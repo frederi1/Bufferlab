@@ -1,0 +1,50 @@
+Compile and run the C files:
+============================
+
+1) Set up your terminal
+$> export PATH=$PATH:/usr/local/cuda/bin
+$> export MANPATH=$MANPATH:/usr/local/cuda/man
+$> export LD_LIBRARY_PATH=/usr/local/cuda/lib64
+
+or, if the above fails
+$> setenv PATH ${PATH}:/usr/local/cuda/bin
+$> setenv MANPATH ${MANPATH}:/usr/local/cuda/man
+$> setenv LD_LIBRARY_PATH /usr/local/cuda/lib64
+
+2) Compile
+$> nvcc -deviceemu thefile.cu -o somename
+
+3) Run
+For 2 files: example_par_correct_show_iteraions.cu
+and example_par_incorrect_show_iterations.cu
+$> ./somename 10
+where 10 is the array dimension size. You can change this parameter.
+
+For per_block_sum_shared_memory.cu
+and sum_variable_blocks_threads.cu
+$> ./somename
+
+Description of the files:
+=========================
+
+* example_par_incorrect_show_iterations.c:
+
+Incorrect version shows the wrong way to access linearized 2D array
+using local thread ID.
+
+* example_par_correct_show_iterations.cu
+
+Correct version shows how nested 2D host array is copied to 1D device
+array and how we access the linearized 2D array using global thread ID.
+
+* sum_variable_blocks_threads.cu
+
+Show how varied block and thread sizes affect the computation of sum
+of 2 arrays. It demonstrates basic techniques such as copy data from host
+to device, device to host, allocate, free device memory, set number
+of blocks, number of threads per block.
+
+* per_block_sum_shared_memory.cu
+
+Show how to compute the sum of each subblock operating on a 1D array
+on device. It demonstrates how to use __device__, __global__, __shared__ memory, use barrier, per-thread private variables. 

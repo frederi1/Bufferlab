@@ -1,0 +1,477 @@
+{\rtf1\ansi\ansicpg1252\cocoartf1038\cocoasubrtf360
+{\fonttbl\f0\fmodern\fcharset0 Courier;}
+{\colortbl;\red255\green255\blue255;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww9000\viewh8400\viewkind0
+\deftab720
+\pard\pardeftab720\ql\qnatural
+
+\f0\fs24 \cf0 #include "header.h"\
+\
+#define BLKSZ 512\
+dim3 myGridDim, myBlockDim;\
+float* blockSums_d;\
+int blockSums_bytes;\
+\
+////////////////////////////////////////////////////////////////////////////////\
+\
+__global__ void Kernel_randWrapper (float out[],float seed,int cols)\
+\{\
+int i = blockIdx.x * blockDim.x + threadIdx.x;\
+for (int j = 0; j < cols; j++)\
+\{\
+float tmp = (i < j) ? (float)(i+1)/(float)(j+1) : (float)(j+1)/(float)(i+1);\
+out[i*cols+j] = seed * tmp;\
+\}\
+\}\
+void\
+randWrapper(float out[], int rows, int cols, float seed)\
+\{\
+Kernel_randWrapper<<<rows,1>>>(out,seed,cols);\
+\}\
+\
+////////////////////////////////////////////////////////////////////////////////\
+\
+__global__ void randnWrapper_kernal (float out[],float seed,int cols)\
+\{\
+        int i = blockIdx.x * blockDim.x + threadIdx.x;\
+        for (int j = 0; j < cols; j++)\
+    \{\
+            float tmp = (i < j) ? (float)(i+1)/(float)(j+1) : (float)(j+1)/(float)(i+1);\
+            float w = seed * tmp;\
+            float x = (-2.f * logf(w)) / w;\
+            out[i*cols+j] = x;\
+    \}\
+\}\
+void\
+randnWrapper(float out[], int rows, int cols, float seed)\
+\{\
+ \
+        randnWrapper_kernal<<<rows,1>>>(out,seed,cols);\
+\}\
+\
+////////////////////////////////////////////////////////////////////////////////\
+\
+void\
+euler2quat(float quat[4], float euler[3])\
+\{\
+	float x = euler[0] * 0.5f;\
+	float y = euler[1] * 0.5f;\
+	float z = euler[2] * 0.5f;\
+\
+	float Cx = cosf(x);\
+	float Cy = cosf(y);\
+	float Cz = cosf(z);\
+	float Sx = sinf(x);\
+	float Sy = sinf(y);\
+	float Sz = sinf(z);\
+\
+	quat[0] = Cx*Cy*Cz + Sx*Sy*Sz;\
+	quat[1] = Sx*Cy*Cz - Cx*Sy*Sz;\
+	quat[2] = Cx*Sy*Cz + Sx*Cy*Sz;\
+	quat[3] = Cx*Cy*Sz - Sx*Sy*Cz;\
+\}\
+\
+void\
+quat_mult(float out[4], float qa[4], float qb[4])\
+\{\
+	float a0 = qa[0];\
+	float a1 = qa[1];\
+	float a2 = qa[2];\
+	float a3 = qa[3];\
+\
+	float b0 = qb[0];\
+	float b1 = qb[1];\
+	float b2 = qb[2];\
+	float b3 = qb[3];\
+\
+	out[0] = a0*b0 - a1*b1 - a2*b2 - a3*b3;\
+	out[1] = a0*b1 + a1*b0 + a2*b3 - a3*b2;\
+	out[2] = a0*b2 - a1*b3 + a2*b0 + a3*b1;\
+	out[3] = a0*b3 + a1*b2 - a2*b1 + a3*b0;\
+\}\
+\
+void\
+quat_rot(float out[3], float vec[3], float quat[4])\
+\{\
+	float vx = vec[0];\
+	float vy = vec[1];\
+	float vz = vec[2];\
+\
+	float q0 = quat[0];\
+	float q1 = quat[1];\
+	float q2 = quat[2];\
+	float q3 = quat[3];\
+\
+	// P = Q * <0,V>\
+	float p0 = q0*0  - q1*vx - q2*vy - q3*vz;\
+	float p1 = q0*vx + q1*0  + q2*vz - q3*vy;\
+	float p2 = q0*vy - q1*vz + q2*0  + q3*vx;\
+	float p3 = q0*vz + q1*vy - q2*vx + q3*0 ;\
+\
+	// R = P * Q'\
+	out[0] = -p0*q1 + p1*q0 - p2*q3 + p3*q2;\
+	out[1] = -p0*q2 + p1*q3 + p2*q0 - p3*q1;\
+	out[2] = -p0*q3 - p1*q2 + p2*q1 + p3*q0;\
+\}\
+\
+////////////////////////////////////////////////////////////////////////////////\
+\
+__global__ void\
+mcl(float out[], int N, float rand1[], float seed, int n_channel, float blockSums[])\
+\{\
+	extern __shared__ float data[];\
+	int i = blockIdx.x*blockDim.x + threadIdx.x;\
+	float scale = sqrtf(1.f / powf(2.f*(float)M_PI, n_channel));\
+	randWrapper(rand1,N,1,seed);\
+\
+	float tmp = (i < N) ? expf(-0.5f*rand1[i])*scale : 0.f;\
+	data[threadIdx.x] = tmp;\
+	if (i < N) out[i] = data[threadIdx.x];\
+	__syncthreads();\
+\
+	// sum reduction into blockSums\
+	if (BLKSZ >= 512 && threadIdx.x < 256) data[threadIdx.x] += data[threadIdx.x+256]; __syncthreads();\
+	if (BLKSZ >= 256 && threadIdx.x < 128) data[threadIdx.x] += data[threadIdx.x+128]; __syncthreads();\
+	if (BLKSZ >= 128 && threadIdx.x <  64) data[threadIdx.x] += data[threadIdx.x+ 64]; __syncthreads();\
+	if (BLKSZ >=  64 && threadIdx.x <  32) data[threadIdx.x] += data[threadIdx.x+ 32]; __syncthreads();\
+	if (BLKSZ >=  32 && threadIdx.x <  16) data[threadIdx.x] += data[threadIdx.x+ 16]; __syncthreads();\
+	if (BLKSZ >=  16 && threadIdx.x <   8) data[threadIdx.x] += data[threadIdx.x+  8]; __syncthreads();\
+	if (BLKSZ >=   8 && threadIdx.x <   4) data[threadIdx.x] += data[threadIdx.x+  4]; __syncthreads();\
+	if (BLKSZ >=   4 && threadIdx.x <   2) data[threadIdx.x] += data[threadIdx.x+  2]; __syncthreads();\
+//	if (BLKSZ >=   2 && threadIdx.x <   1) data[threadIdx.x] += data[threadIdx.x+  1]; __syncthreads();\
+\
+	if (threadIdx.x == 0) blockSums[blockIdx.x] = data[0] + data[1];\
+\}\
+\
+__global__ void\
+mcl_part2(float sums[])\
+\{\
+	extern __shared__ float local[];\
+	int i = threadIdx.x;\
+	int n = blockDim.x;\
+	local[i] = sums[i];\
+	__syncthreads();\
+\
+	int step;\
+	for (step = n/2; step > 0; step >>= 1)\
+	\{\
+		if (i < step && i + step < n)\
+			local[i] += local[i+step];\
+		__syncthreads();\
+	\}\
+\
+	if (i == 0) sums[0] = floorf(local[0]+0.5f);\
+\}\
+\
+__global__ void\
+mcl_part3(float data[], int N, float sums[])\
+\{\
+	int i = blockIdx.x*blockDim.x + threadIdx.x;\
+	if (i < N) data[i] /= sums[0];\
+\}\
+\
+////////////////////////////////////////////////////////////////////////////////\
+\
+__global__ void  weightedSample_kernal(int out[],float rand1[],float w[],int N)\
+\{\
+        int j = blockIdx.x;\
+        int i;\
+        float rand_j = rand1[j];\
+        for (i = 0; i < N; i++)\
+        \{\
+                if (rand_j <= 0) break;\
+                rand_j -= w[i];\
+        \}\
+        out[j] = i;\
+\}\
+ \
+ \
+void\
+weightedSample(int out[], int N, float rand1[], float seed, float w[])\
+\{\
+        randWrapper(rand1,N,1,seed);\
+        weightedSample_kernal<<<N,1>>>(out,rand1,w,N);\
+\}\
+\
+////////////////////////////////////////////////////////////////////////////////\
+\
+__global__ void generateSample_kernal (int sampleXId[],float quat[][4], float vel[][3], float pos[][3], \\\
+               float retQuat[][4], float retVel[][3], float retPos[][3])\
+\{\
+        int i = blockIdx.x;                \
+        int index = sampleXId[i] - 1;\
+       \
+        retQuat[i][0] = quat[index][0];\
+        retQuat[i][1] = quat[index][1];\
+        retQuat[i][2] = quat[index][2];\
+        retQuat[i][3] = quat[index][3];\
+       \
+        retVel[i][0] = vel[index][0];\
+        retVel[i][1] = vel[index][1];\
+        retVel[i][2] = vel[index][2];\
+       \
+        retPos[i][0] = pos[index][0];\
+        retPos[i][1] = pos[index][1];\
+        retPos[i][2] = pos[index][2];\
+\}\
+void\
+generateSample(int N, float seed, float w[], float rand1[], int sampleXId[], \\\
+               float quat[][4], float vel[][3], float pos[][3], \\\
+               float retQuat[][4], float retVel[][3], float retPos[][3])\
+\{\
+        weightedSample(sampleXId,N,rand1,seed,w);\
+    generateSample_kernal<<<N,1>>>(sampleXId,quat,vel,pos,retQuat,retVel,retPos);\
+\}\
+\
+////////////////////////////////////////////////////////////////////////////////\
+\
+void\
+entry_type1(int N, float seed, float rand1[], float mcl_out[], int ws_out[], \\\
+            float quat[][4], float pos[][3], float vel[][3], \\\
+            float quat2[][4], float pos2[][3], float vel2[][3])\
+\{\
+	int bytes = myBlockDim.x * sizeof(float);\
+	mcl<<<myGridDim,myBlockDim,bytes>>>(mcl_out, N, rand1, seed, 1, blockSums_d);\
+\
+	int bytes2 = myGridDim.x * sizeof(float);\
+	mcl_part2<<<1,myGridDim,bytes2>>>(blockSums_d);\
+\
+	mcl_part3<<<myGridDim,myBlockDim>>>(mcl_out, N, blockSums_d);\
+\
+	generateSample<<<myGridDim,myBlockDim>>>(N, seed, mcl_out, rand1, ws_out, quat, vel, pos, quat2, vel2, pos2);\
+\}\
+\
+////////////////////////////////////////////////////////////////////////////////\
+\
+__global__ void\
+kernel_entry_type2(int N, float x, float y, float z, \\\
+            float quat[][4], float randn3[][3])\
+\{\
+	int i = blockIdx.x*blockDim.x + threadIdx.x;\
+\
+	if (i < N)\
+	\{\
+		float g0 = x + randn3[i][0] * STDDEV_GYRO;\
+		float g1 = y + randn3[i][1] * STDDEV_GYRO;\
+		float g2 = z + randn3[i][2] * STDDEV_GYRO;\
+\
+		float norm = sqrtf(g0*g0 + g1*g1 + g2*g2);\
+\
+		g0 /= norm;\
+		g1 /= norm;\
+		g2 /= norm;\
+\
+		float tmp = norm * GYRO_DT * 0.5f;\
+		float cosA = cosf(tmp);\
+		float sinA = sinf(tmp);\
+\
+		float gquat[] = \{cosA, sinA*g0, sinA*g1, sinA*g2\};\
+\
+		quat_mult(quat[i],quat[i],gquat);\
+	\}\
+\}\
+\
+void\
+entry_type2(int N, float x, float y, float z, \\\
+            float quat[][4], float randn3[][3])\
+\{\
+	kernel_entry_type2<<<myGridDim,myBlockDim>>>(N,x,y,z,quat,randn3);\
+\}\
+\
+////////////////////////////////////////////////////////////////////////////////\
+\
+__global__ void\
+kernel_entry_type3(int N, float acc0, float acc1, float acc2, float randn3[][3], \\\
+                   float quat[][4], float vel[][3], float pos[][3])\
+\{\
+	int i = blockIdx.x*blockDim.x + threadIdx.x;\
+\
+	if (i < N)\
+	\{\
+		float qconj[] = \{ quat[i][0], -quat[i][1], -quat[i][2], -quat[i][3] \};\
+\
+		float s[3];\
+		quat_rot(s, vel[i], qconj); // s = vel[i] ROT quat[i]'\
+\
+		float g[] = \{0.f,0.f,-9.8f\};\
+		quat_rot(g, g, quat[i]); // g = [0 0 -9.8] ROT quat[i]\
+\
+		float a[] = \{acc0-g[0], acc1-g[1], acc2-g[2]\}; // a = acc - g\
+\
+		// vel[i] += a * ACCL_DT  +  randn3[i] * STDDEV_VEL\
+		vel[i][0] += a[0]*ACCL_DT + randn3[i][0]*STDDEV_VEL;\
+		vel[i][1] += a[1]*ACCL_DT + randn3[i][1]*STDDEV_VEL;\
+		vel[i][2] += a[2]*ACCL_DT + randn3[i][2]*STDDEV_VEL;\
+\
+		// a = a ROT quat[i]'\
+		quat_rot(a, a, qconj);\
+\
+		// pos[i] += s * ACCL_DT  +  0.5 * a * ACCL_DT^2\
+		pos[i][0] += (s[0] + a[0]*0.5f*ACCL_DT)*ACCL_DT + randn3[i][0]*STDDEV_POS;\
+		pos[i][1] += (s[1] + a[1]*0.5f*ACCL_DT)*ACCL_DT + randn3[i][1]*STDDEV_POS;\
+		pos[i][2] += (s[2] + a[2]*0.5f*ACCL_DT)*ACCL_DT + randn3[i][2]*STDDEV_POS;\
+	\}\
+\}\
+\
+void\
+entry_type3(int N, float acc0, float acc1, float acc2, float seed, \\\
+            float randn3[][3], float rand1[], float mcl_out[], int ws_out[], \\\
+            float quat[][4], float pos[][3], float vel[][3], \\\
+            float quat2[][4], float pos2[][3], float vel2[][3])\
+\{\
+	int bytes = myBlockDim.x * sizeof(float);\
+	mcl<<<myGridDim,myBlockDim,bytes>>>(mcl_out, N, rand1, seed, 3, blockSums_d);\
+\
+	int bytes2 = myGridDim.x * sizeof(float);\
+	mcl_part2<<<1,myGridDim,bytes2>>>(blockSums_d);\
+\
+	mcl_part3<<<myGridDim,myBlockDim>>>(mcl_out, N, blockSums_d);\
+\
+	generateSample<<<myGridDim,myBlockDim>>>(N, seed, mcl_out, rand1, ws_out, quat, vel, pos, quat2, vel2, pos2);\
+\
+	kernel_entry_type3<<<myGridDim,myBlockDim>>>(N, acc0, acc1, acc2, randn3, quat2, vel2, pos2);\
+\}\
+\
+////////////////////////////////////////////////////////////////////////////////\
+\
+__global__ void\
+kernel_entry_type4(int N, float d0, float d1, float d2, \\\
+                   float d6, float d7, float randn3[][3], float pos[][3])\
+\{\
+	int i = blockIdx.x*blockDim.x + threadIdx.x;\
+\
+	if (i < N)\
+	\{\
+		pos[i][0] =   d6 * randn3[i][0] + d0;\
+		pos[i][1] =   d7 * randn3[i][1] + d1;\
+		pos[i][2] = 15.f * randn3[i][2] + d2;\
+	\}\
+\}\
+\
+void\
+entry_type4(int N, float d0, float d1, float d2, \\\
+            float d6, float d7, float seed, \\\
+            float randn3[][3], float rand1[], float mcl_out[], int ws_out[], \\\
+            float quat[][4], float pos[][3], float vel[][3], \\\
+            float quat2[][4], float pos2[][3], float vel2[][3])\
+\{\
+	kernel_entry_type4<<<myGridDim,myBlockDim>>>(N,d0,d1,d2,d6,d7,randn3,pos);\
+\
+	int bytes = myBlockDim.x * sizeof(float);\
+	mcl<<<myGridDim,myBlockDim,bytes>>>(mcl_out, N, rand1, seed, 4, blockSums_d);\
+\
+	int bytes2 = myGridDim.x * sizeof(float);\
+	mcl_part2<<<1,myGridDim,bytes2>>>(blockSums_d);\
+\
+	mcl_part3<<<myGridDim,myBlockDim>>>(mcl_out, N, blockSums_d);\
+\
+	generateSample<<<myGridDim,myBlockDim>>>(N, seed,  mcl_out, rand1, ws_out, quat, vel, pos, quat2, vel2, pos2);\
+\}\
+\
+////////////////////////////////////////////////////////////////////////////////\
+\
+void\
+allocateData(int N, float** randn3, float** rand3, float** rand1, \\\
+             float** quat, float** vel, float** pos, \\\
+             float** quat2, float** vel2, float** pos2, \\\
+             int** ws_out, float** mcl_out)\
+\{\
+	int FN4 = N*4*sizeof(float);\
+	int FN3 = N*3*sizeof(float);\
+	int FN1 = N*1*sizeof(float);\
+	int IN1 = N*1*sizeof(int);\
+\
+	cudaMalloc(randn3,FN3);\
+	cudaMalloc(rand3,FN3);\
+	cudaMalloc(rand1,FN1);\
+\
+	cudaMalloc(quat,FN4);\
+	cudaMalloc(quat2,FN4);\
+	cudaMalloc(vel,FN3);\
+	cudaMalloc(vel2,FN3);\
+	cudaMalloc(pos,FN3);\
+	cudaMalloc(pos2,FN3);\
+\
+	cudaMalloc(ws_out,IN1);\
+	cudaMalloc(mcl_out,FN1);\
+\}\
+\
+////////////////////////////////////////////////////////////////////////////////\
+\
+__global__ void\
+kernel_initializeData(int N, float seed, float randn3[][3], float rand3[][3], \\\
+                      float quat[][4], float vel[][3], float pos[][3])\
+\{\
+	int i = blockDim.x * blockIdx.x + threadIdx.x;\
+	__shared__ float quat0[4];\
+\
+	if (threadIdx.x == 0)\
+	\{\
+		float angle0[] = \{(float)M_PI,0.f,0.f\};\
+		euler2quat(quat0,angle0);\
+	\}\
+	__syncthreads();\
+\
+	if (i < N)\
+	\{\
+		// fill pos with zeros\
+		pos[i][0] = 0.f;\
+		pos[i][1] = 0.f;\
+		pos[i][2] = 0.f;\
+\
+		// fill random values\
+		randnWrapper((float*)randn3,N,3,seed);\
+		randWrapper((float*)rand3,N,3,seed);\
+\
+		// set velocity\
+		vel[i][0] = rand3[i][0] * STDDEV_ODOVel;\
+		vel[i][1] = rand3[i][1] * STDDEV_ODOVel;\
+		vel[i][2] = rand3[i][2] * STDDEV_ODOVel;\
+\
+		// set quaternion\
+		float q[4];\
+		float a[] = \{ 0.f, 0.f, rand3[i][0]*(2.f*(float)M_PI) \};\
+		euler2quat(q,a);\
+		quat_mult(quat[i], q, quat0);\
+	\}\
+\}\
+\
+void\
+initializeData(int N, float seed, float randn3[][3], float rand3[][3], \\\
+               float quat[][4], float vel[][3], float pos[][3])\
+\{\
+	// setup kernel parameters\
+	myBlockDim.x = BLKSZ;\
+	myGridDim.x = (N+BLKSZ-1)/BLKSZ;\
+\
+	// array of block sums from mcl()\
+	blockSums_bytes = myGridDim.x * sizeof(float);\
+	cudaMalloc(&blockSums_d, blockSums_bytes);\
+\
+	// initialize data on GPU\
+	kernel_initializeData<<<myGridDim,myBlockDim>>>(N,seed,randn3,rand3,quat,vel,pos);\
+\}\
+\
+////////////////////////////////////////////////////////////////////////////////\
+\
+void\
+deallocateData(float* randn3, float* rand3, float* rand1, \\\
+               float* quat , float* vel , float* pos, \\\
+               float* quat2, float* vel2, float* pos2, \\\
+               int* ws_out, float* mcl_out)\
+\{\
+	cudaFree(randn3);\
+	cudaFree(rand3);\
+	cudaFree(rand1);\
+	cudaFree(quat);\
+	cudaFree(quat2);\
+	cudaFree(vel);\
+	cudaFree(pos);\
+	cudaFree(vel2);\
+	cudaFree(pos2);\
+	cudaFree(ws_out);\
+	cudaFree(mcl_out);\
+\
+	cudaFree(blockSums_d);\
+\}\
+}
